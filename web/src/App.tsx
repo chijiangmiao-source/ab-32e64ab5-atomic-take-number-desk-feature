@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { createHttpApi } from './lib/api';
 import { Issuer } from './lib/issuer';
+import { NotesEditor } from './lib/notesEditor';
+import { NotesCell } from './components/NotesCell';
 import type { IssuedOperation } from './lib/types';
 
 const api = createHttpApi();
@@ -14,6 +16,7 @@ function shortId(id: string): string {
 export default function App() {
   const [issuer] = useState(() => new Issuer(api, window.localStorage));
   const snapshot = useSyncExternalStore(issuer.subscribe, issuer.getSnapshot);
+  const [notesEditor] = useState(() => new NotesEditor(api));
 
   const [sceneId, setSceneId] = useState(
     () => window.localStorage.getItem(SCENE_STORAGE_KEY) ?? '',
@@ -26,19 +29,38 @@ export default function App() {
   const [sceneOps, setSceneOps] = useState<IssuedOperation[]>([]);
   const [boardError, setBoardError] = useState<string | null>(null);
 
+  // Poll responses may arrive out of order.  Each refresh gets a strictly
+  // increasing sequence number; only the freshest response is applied, so an
+  // older snapshot can never overwrite a newer notes revision on the board.
+  const pollSeq = useRef(0);
+  const appliedSeq = useRef(0);
+
   const refreshBoard = useCallback(async (scene: string) => {
     const trimmed = scene.trim();
+    const seq = (pollSeq.current += 1);
     if (!trimmed) {
+      appliedSeq.current = seq;
       setSceneOps([]);
       return;
     }
     try {
-      setSceneOps(await api.listSceneOperations(trimmed));
+      const operations = await api.listSceneOperations(trimmed);
+      if (seq < appliedSeq.current) {
+        // A fresher response was applied (or the scene was cleared): drop this
+        // stale response entirely — it must not overwrite newer revisions.
+        return;
+      }
+      appliedSeq.current = seq;
+      setSceneOps(operations);
+      notesEditor.syncFromBoard(operations);
       setBoardError(null);
     } catch {
-      setBoardError('场次看板刷新失败：镜号服务不可达');
+      // A failed refresh must not clobber a fresher board either.
+      if (seq >= appliedSeq.current) {
+        setBoardError('场次看板刷新失败：镜号服务不可达');
+      }
     }
-  }, []);
+  }, [notesEditor]);
 
   const issuedCount = snapshot.issued.length;
   useEffect(() => {
@@ -66,6 +88,8 @@ export default function App() {
         // 本次操作已完成：直接为下一条镜号备好新标识，
         // 现场改完备注即可再次领取，不必手动换标识。
         setOpId(issuer.newOperationId());
+        // 立即拉取一次看板，让新镜号（与修订号）尽快出现。
+        await refreshBoard(scene);
       } else if (usedId !== opId) {
         // 标识与某个待重试操作撞车，控制器已另发新标识：同步到表单。
         setOpId(usedId);
@@ -80,6 +104,7 @@ export default function App() {
     if (outcome.kind === 'success') {
       // 待重试操作已成功：若主表单还拿着它的标识，一并换新。
       setOpId((current) => (current === clientOpId ? issuer.newOperationId() : current));
+      await refreshBoard(sceneId);
     }
   };
 
@@ -91,6 +116,7 @@ export default function App() {
         <h1>镜号发放台</h1>
         <p className="subtitle">
           多台场记终端并发领取镜号：同一操作标识重试永远取回同一号码，号码严格连续、以提交顺序为准。
+          领取后可在场次看板行内修订备注，镜号与发放请求指纹不变。
         </p>
       </header>
 
@@ -111,7 +137,7 @@ export default function App() {
 
             <label className="field">
               <span>
-                备注
+                发放备注
                 <span className={notesTooLong ? 'error-text' : 'counter'}>
                   （{notes.length}/{NOTES_MAX_LENGTH}）
                 </span>
@@ -120,7 +146,7 @@ export default function App() {
                 data-testid="notes-input"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="镜头内容备注，可留空"
+                placeholder="镜头内容备注，可留空；领取后仍可在看板行内修订"
                 rows={2}
                 aria-invalid={notesTooLong}
               />
@@ -274,7 +300,7 @@ export default function App() {
               <thead>
                 <tr>
                   <th>镜号</th>
-                  <th>备注</th>
+                  <th>备注（行内可修订）</th>
                   <th>操作标识</th>
                   <th>发放时间 (UTC)</th>
                 </tr>
@@ -283,7 +309,13 @@ export default function App() {
                 {sceneOps.map((op) => (
                   <tr key={op.client_op_id} data-testid="scene-op-row">
                     <td className="num">#{op.shot_number}</td>
-                    <td>{op.notes || '—'}</td>
+                    <td className="notes-cell-wrap">
+                      <NotesCell
+                        operation={op}
+                        editor={notesEditor}
+                        onSaved={() => void refreshBoard(sceneId)}
+                      />
+                    </td>
                     <td className="mono">{shortId(op.client_op_id)}</td>
                     <td className="mono">{op.created_at}</td>
                   </tr>

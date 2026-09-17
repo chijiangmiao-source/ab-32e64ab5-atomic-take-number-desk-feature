@@ -264,3 +264,155 @@ td.mono {
   font-size: 12px;
   color: #8b96a2;
 }
+
+/* ---- 行内备注修订 ---- */
+
+.notes-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.notes-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1;
+  min-width: 0;
+}
+
+.notes-edit-button {
+  padding: 2px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.revision-badge {
+  display: inline-block;
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #243042;
+  color: #9db4d6;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+
+.notes-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 260px;
+}
+
+.notes-editor textarea {
+  resize: vertical;
+  font-size: 13px;
+}
+
+.notes-editor-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.merge-notice {
+  color: #8fd0ff;
+  font-size: 12px;
+}
+
+.notes-editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.notes-editor-actions button {
+  padding: 5px 14px;
+  font-size: 13px;
+}
+
+.conflict-box {
+  border: 1px solid #8a3a3a;
+  border-radius: 8px;
+  padding: 10px;
+  background: #241719;
+}
+
+.conflict-title {
+  color: #ff9a8a;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.conflict-fragment {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.conflict-side {
+  border-left: 3px solid #5a6675;
+  padding-left: 8px;
+}
+
+.conflict-side.current {
+  border-left-color: #4d7cfe;
+}
+
+.conflict-side.incoming {
+  border-left-color: #d6a24d;
+}
+
+.conflict-label {
+  display: block;
+  font-size: 11px;
+  color: #9aa4af;
+  margin-bottom: 2px;
+}
+
+.conflict-side pre,
+.history-item pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 12px;
+  color: #d6dde5;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.conflict-actions button {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.history-box {
+  border-top: 1px dashed #33404e;
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: #131a21;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.history-time {
+  font-size: 11px;
+  color: #8b96a2;
+  font-family: ui-monospace, monospace;
+}

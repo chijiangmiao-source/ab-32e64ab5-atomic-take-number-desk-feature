@@ -20,6 +20,7 @@ function issuedResponse(body: IssueRequestBody, shotNumber: number): IssueRespon
     notes: body.notes,
     shot_number: shotNumber,
     created_at: '2026-09-15T00:00:00.000Z',
+    notes_revision: 1,
     replayed: false,
   };
 }
@@ -31,6 +32,7 @@ function existingOperation(body: IssueRequestBody, shotNumber: number): IssuedOp
     notes: body.notes,
     shot_number: shotNumber,
     created_at: '2026-09-15T00:00:00.000Z',
+    notes_revision: 1,
   };
 }
 
@@ -39,12 +41,20 @@ function idSequence(): () => string {
   return () => `op-${(seq += 1)}`;
 }
 
+function mockApi(issue: ShotNumberApi['issue']): ShotNumberApi {
+  return {
+    issue: vi.fn(issue),
+    updateNotes: vi.fn(async () => {
+      throw new Error('updateNotes not expected');
+    }),
+    listNoteRevisions: vi.fn(async () => []),
+    listSceneOperations: vi.fn(async () => []),
+  };
+}
+
 describe('Issuer', () => {
   it('提交成功后记录镜号并清空待重试', async () => {
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body) => issuedResponse(body, 7)),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body) => issuedResponse(body, 7));
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
     const { opId, outcome } = await issuer.submit({ scene_id: 'A-1', notes: '开场' });
@@ -59,12 +69,9 @@ describe('Issuer', () => {
   });
 
   it('可重试失败（503/网络）后保留待重试操作，且持久化到本地存储', async () => {
-    const api: ShotNumberApi = {
-      issue: vi.fn(async () => {
-        throw new RetryableError('服务暂时不可用（HTTP 503）', 503);
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async () => {
+      throw new RetryableError('服务暂时不可用（HTTP 503）', 503);
+    });
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
 
@@ -89,14 +96,11 @@ describe('Issuer', () => {
   it('恢复后重试使用完全相同的 client_op_id 与内容，成功后显示唯一镜号', async () => {
     const calls: IssueRequestBody[] = [];
     let down = true;
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body: IssueRequestBody) => {
-        calls.push(body);
-        if (down) throw new RetryableError('网络异常');
-        return { ...issuedResponse(body, 3), replayed: true };
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body: IssueRequestBody) => {
+      calls.push(body);
+      if (down) throw new RetryableError('网络异常');
+      return { ...issuedResponse(body, 3), replayed: true };
+    });
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
 
@@ -124,14 +128,11 @@ describe('Issuer', () => {
 
   it('故障注入标记只在首次尝试时透传', async () => {
     const calls: IssueRequestBody[] = [];
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body: IssueRequestBody) => {
-        calls.push(body);
-        if (calls.length === 1) throw new RetryableError('注入故障', 503);
-        return issuedResponse(body, 1);
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body: IssueRequestBody) => {
+      calls.push(body);
+      if (calls.length === 1) throw new RetryableError('注入故障', 503);
+      return issuedResponse(body, 1);
+    });
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
     await issuer.submit({ scene_id: 'C-3', notes: '', injectFailureAfterCommit: true });
@@ -143,12 +144,9 @@ describe('Issuer', () => {
   });
 
   it('409 冲突转入失败列表并给出反馈，不再重试', async () => {
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body: IssueRequestBody) => {
-        throw new ConflictError('client_op_id 已被占用', existingOperation(body, 5));
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body: IssueRequestBody) => {
+      throw new ConflictError('client_op_id 已被占用', existingOperation(body, 5));
+    });
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
 
@@ -167,17 +165,14 @@ describe('Issuer', () => {
   it('待重试操作存在时，同标识不同内容的提交另发新标识且保留原操作', async () => {
     const calls: IssueRequestBody[] = [];
     let firstOpDown = true;
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body: IssueRequestBody) => {
-        calls.push(body);
-        if (body.client_op_id === 'op-1') {
-          if (firstOpDown) throw new RetryableError('注入故障（HTTP 503）', 503);
-          return { ...issuedResponse(body, 1), replayed: true };
-        }
-        return issuedResponse(body, 2);
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body: IssueRequestBody) => {
+      calls.push(body);
+      if (body.client_op_id === 'op-1') {
+        if (firstOpDown) throw new RetryableError('注入故障（HTTP 503）', 503);
+        return { ...issuedResponse(body, 1), replayed: true };
+      }
+      return issuedResponse(body, 2);
+    });
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
     // 首次提交被注入故障：op-1（原始备注）进入待重试
@@ -221,14 +216,11 @@ describe('Issuer', () => {
   it('待重试操作存在时，同标识同内容的提交按重试处理（不新建操作）', async () => {
     const calls: IssueRequestBody[] = [];
     let down = true;
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body: IssueRequestBody) => {
-        calls.push(body);
-        if (down) throw new RetryableError('网络异常');
-        return { ...issuedResponse(body, 4), replayed: true };
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body: IssueRequestBody) => {
+      calls.push(body);
+      if (down) throw new RetryableError('网络异常');
+      return { ...issuedResponse(body, 4), replayed: true };
+    });
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
     await issuer.submit({ scene_id: 'S-9', notes: '同一份内容' });
@@ -251,12 +243,9 @@ describe('Issuer', () => {
   });
 
   it('请求不合法（4xx，如备注超长）进入失败列表，不再显示为可重试', async () => {
-    const api: ShotNumberApi = {
-      issue: vi.fn(async () => {
-        throw new RequestError('请求被拒绝：备注超过 4000 字上限', 422);
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async () => {
+      throw new RequestError('请求被拒绝：备注超过 4000 字上限', 422);
+    });
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
 
@@ -278,12 +267,9 @@ describe('Issuer', () => {
   });
 
   it('放弃待重试操作后从存储中移除', async () => {
-    const api: ShotNumberApi = {
-      issue: vi.fn(async () => {
-        throw new RetryableError('网络异常');
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async () => {
+      throw new RetryableError('网络异常');
+    });
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
 
@@ -297,13 +283,10 @@ describe('Issuer', () => {
 
   it('同一操作标识重复提交由服务器幂等处理：客户端只发相同载荷', async () => {
     const calls: IssueRequestBody[] = [];
-    const api: ShotNumberApi = {
-      issue: vi.fn(async (body: IssueRequestBody) => {
-        calls.push(body);
-        return { ...issuedResponse(body, 9), replayed: calls.length > 1 };
-      }),
-      listSceneOperations: async () => [],
-    };
+    const api = mockApi(async (body: IssueRequestBody) => {
+      calls.push(body);
+      return { ...issuedResponse(body, 9), replayed: calls.length > 1 };
+    });
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
     // 用户拿着同一个 op id 连续提交两次（例如双击）

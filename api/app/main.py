@@ -8,7 +8,17 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 
-from .storage import CONFLICT, ISSUED, REPLAYED, Operation, Storage
+from .storage import (
+    BASE_INVALID,
+    CONFLICT,
+    ISSUED,
+    MERGED,
+    NOTES_CONFLICT,
+    OP_NOT_FOUND,
+    REPLAYED,
+    Operation,
+    Storage,
+)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -44,6 +54,8 @@ class OperationModel(BaseModel):
     notes: str
     shot_number: int
     created_at: str
+    # Current revision of the editable notes (1 = the issuance text).
+    notes_revision: int
 
     @classmethod
     def from_operation(cls, op: Operation) -> "OperationModel":
@@ -54,6 +66,23 @@ class IssueResponseModel(OperationModel):
     # True when the request was an idempotent replay of an already-committed
     # operation (no new number was allocated).
     replayed: bool
+
+
+class UpdateNotesRequest(BaseModel):
+    # Revision the clerk edited from; older bases trigger a three-way merge.
+    base_revision: int = Field(ge=1)
+    new_notes: str = Field(max_length=4000)
+
+
+class UpdateNotesResponseModel(OperationModel):
+    # True when concurrent disjoint edits were merged into this one revision.
+    merged: bool
+
+
+class NoteRevisionModel(BaseModel):
+    revision: int
+    notes: str
+    revised_at: str
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +99,7 @@ def create_app(
         allow_failure_injection = _env_flag("ALLOW_FAILURE_INJECTION")
 
     storage = Storage(db_path)
-    app = FastAPI(title="Shot Number Issuer", version="1.0.0")
+    app = FastAPI(title="Shot Number Issuer", version="1.1.0")
     app.state.storage = storage
     app.state.allow_failure_injection = allow_failure_injection
 
@@ -130,6 +159,81 @@ def create_app(
             response.status_code = 200
 
         return body
+
+    @app.patch(
+        "/api/operations/{client_op_id}/notes",
+        response_model=UpdateNotesResponseModel,
+    )
+    def update_operation_notes(
+        client_op_id: str, request: UpdateNotesRequest, response: Response
+    ) -> UpdateNotesResponseModel:
+        outcome = storage.update_notes(
+            client_op_id=client_op_id,
+            base_revision=request.base_revision,
+            new_notes=request.new_notes,
+        )
+
+        if outcome.status == OP_NOT_FOUND:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": "操作标识不存在"},
+            )
+        if outcome.status == BASE_INVALID:
+            assert outcome.operation is not None
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "base_revision_unknown",
+                    "message": (
+                        "基础修订号不存在；请以看板上的最新修订号为基础重新编辑"
+                    ),
+                    "base_revision": request.base_revision,
+                    "current_revision": outcome.operation.notes_revision,
+                },
+            )
+        if outcome.status == NOTES_CONFLICT:
+            assert outcome.operation is not None
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "notes_revision_conflict",
+                    "message": (
+                        "备注修订冲突：双方改动了同一区域，数据库保持原样，"
+                        "请参照三方片段整理后再次保存"
+                    ),
+                    "base_revision": request.base_revision,
+                    "current_revision": outcome.operation.notes_revision,
+                    "current_notes": outcome.operation.notes,
+                    "fragments": [
+                        {
+                            "base": fragment.base,
+                            "current": fragment.current,
+                            "incoming": fragment.incoming,
+                        }
+                        for fragment in outcome.fragments
+                    ],
+                },
+            )
+
+        assert outcome.operation is not None
+        response.status_code = 200
+        return UpdateNotesResponseModel(
+            **outcome.operation.as_dict(),
+            merged=outcome.status == MERGED,
+        )
+
+    @app.get(
+        "/api/operations/{client_op_id}/note-revisions",
+        response_model=list[NoteRevisionModel],
+    )
+    def list_note_revisions(client_op_id: str) -> list[NoteRevisionModel]:
+        revisions = storage.list_note_revisions(client_op_id)
+        if revisions is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": "操作标识不存在"},
+            )
+        return [NoteRevisionModel(**revision.as_dict()) for revision in revisions]
 
     @app.get("/api/scenes/{scene_id}/operations", response_model=list[OperationModel])
     def list_scene_operations(scene_id: str) -> list[OperationModel]:

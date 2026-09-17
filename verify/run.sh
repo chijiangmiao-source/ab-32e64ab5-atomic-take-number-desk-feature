@@ -22,10 +22,10 @@ with urllib.request.urlopen(f"{web_base}/", timeout=10) as resp:
 print(f"web 页面与 /api 代理正常: {web_base}")
 PY
 
-echo "== 2/3 pytest：20 并发无重号无缺号 / 重复提交幂等 / 409 冲突 / 重启恢复 / 故障注入 =="
+echo "== 2/3 pytest：20 并发无重号无缺号 / 重复提交幂等 / 409 冲突 / 重启恢复 / 故障注入 / 旧库迁移重放 / 备注三方合并与冲突 =="
 python -m pytest tests -v
 
-echo "== 3/3 Vitest：前端重试保留与错误反馈逻辑 =="
+echo "== 3/3 Vitest：前端重试保留、错误反馈与备注修订草稿状态 =="
 npm --prefix web test
 
 echo "验收通过：全部检查成功"
