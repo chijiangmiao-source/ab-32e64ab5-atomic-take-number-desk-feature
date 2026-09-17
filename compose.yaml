@@ -1,0 +1,50 @@
+name: shot-number-issuer
+
+services:
+  api:
+    build: ./api
+    environment:
+      SHOT_DB_PATH: /data/shotnumbers.db
+      # 开发/验收环境开放故障注入（inject_failure_after_commit）；生产部署置为 "false"
+      ALLOW_FAILURE_INJECTION: "true"
+    volumes:
+      - api-data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  web:
+    build: ./web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # 一次性验收服务：跑完 pytest（并发/重启/故障注入/冲突）与 Vitest 后退出，
+  # 退出码即验收结果。不会随默认 `docker compose up` 启动。
+  verify:
+    profiles: ["acceptance"]
+    build:
+      context: .
+      dockerfile: verify/Dockerfile
+    environment:
+      API_BASE_URL: http://api:8000
+      WEB_BASE_URL: http://web
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+volumes:
+  api-data:

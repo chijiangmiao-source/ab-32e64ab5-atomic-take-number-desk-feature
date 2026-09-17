@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 本地数据库与运行时数据
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Node / 前端构建产物
+node_modules/
+dist/
+
+# 端到端与测试产物
+web/.e2e-tmp/
+test-results/
+playwright-report/
+
+# 系统与编辑器
+.DS_Store
+*.log
+.idea/
+.vscode/
