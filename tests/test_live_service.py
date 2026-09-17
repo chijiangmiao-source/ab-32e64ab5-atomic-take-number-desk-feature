@@ -90,3 +90,91 @@ def test_live_injected_failure_replays_original_number():
     assert retry.status_code == 200
     assert retry.json()["shot_number"] == 1
     assert retry.json()["replayed"] is True
+
+
+def test_live_note_revisions_merge_conflict_and_sequence():
+    """备注可修订的完整现场流（对持久库安全，场景/标识每次唯一）。
+
+    修订备注不影响幂等：同一 client_op_id 携发放时备注仍取回原号码；
+    两终端不相交编辑自动合并，重叠编辑 409（数据库不动），解决后再存；
+    整个过程镜号序列不受影响。
+    """
+    scene = _scene()
+    op1 = httpx.post(
+        f"{BASE_URL}/api/shot-numbers",
+        json={"scene_id": scene, "client_op_id": uuid.uuid4().hex,
+              "notes": "第一段\n第二段\n第三段\n"},
+        timeout=10.0,
+    )
+    assert op1.status_code == 201
+    op1_id = op1.json()["client_op_id"]
+    assert op1.json()["notes_revision"] == 0
+
+    def patch(base_revision: int, notes: str):
+        return httpx.patch(
+            f"{BASE_URL}/api/operations/{op1_id}/notes",
+            json={"client_op_id": op1_id, "base_revision": base_revision,
+                  "notes": notes},
+            timeout=10.0,
+        )
+
+    # 迁移/重放不变式：发放备注是不可变指纹。修订后用原始备注重试发放，
+    # 仍然幂等取回原镜号。
+    saved = patch(0, "第一段\n第二段\n第三段（补充）\n")
+    assert saved.status_code == 200
+    assert saved.json()["notes_revision"] == 1
+
+    replay = httpx.post(
+        f"{BASE_URL}/api/shot-numbers",
+        json={"scene_id": scene, "client_op_id": op1_id,
+              "notes": "第一段\n第二段\n第三段\n"},
+        timeout=10.0,
+    )
+    assert replay.status_code == 200
+    assert replay.json()["shot_number"] == 1
+    assert replay.json()["replayed"] is True
+
+    # 两终端：终端 A 从旧基础号 r0 改第一段；服务端当前为 r1（改了第三段），
+    # 两处不相交 -> 自动合并，只产生一个新修订 r2。
+    merged = patch(0, "第一段（A改）\n第二段\n第三段\n")
+    assert merged.status_code == 200
+    body = merged.json()
+    assert body["merge_status"] == "merged"
+    assert body["notes_revision"] == 2
+    assert body["notes"] == "第一段（A改）\n第二段\n第三段（补充）\n"
+
+    # 重叠改动 -> 409 且带三方片段，数据库保持在 r2。
+    clash = patch(0, "完全重写的内容，与任何版本都不相交但替换了全文")
+    assert clash.status_code == 409
+    detail = clash.json()["detail"]
+    assert detail["error"] == "notes_conflict"
+    assert detail["current"]["notes_revision"] == 2
+    assert len(detail["conflicts"]) >= 1
+
+    current = httpx.get(f"{BASE_URL}/api/operations/{op1_id}", timeout=10.0)
+    assert current.json()["notes_revision"] == 2
+
+    # 场记以服务端当前版本为基础整理后再次保存 -> r3。
+    resolved = patch(2, body["notes"] + "整理后的结尾\n")
+    assert resolved.status_code == 200
+    assert resolved.json()["notes_revision"] == 3
+
+    # 历史版本完整。
+    history = httpx.get(
+        f"{BASE_URL}/api/operations/{op1_id}/note-revisions", timeout=10.0
+    )
+    assert history.status_code == 200
+    assert [r["revision"] for r in history.json()] == [0, 1, 2, 3]
+
+    # 镜号序列不受备注修订影响：下一条新镜号为 #2。
+    op2 = httpx.post(
+        f"{BASE_URL}/api/shot-numbers",
+        json={"scene_id": scene, "client_op_id": uuid.uuid4().hex, "notes": "第二条"},
+        timeout=10.0,
+    )
+    assert op2.status_code == 201
+    assert op2.json()["shot_number"] == 2
+
+    listing = httpx.get(f"{BASE_URL}/api/scenes/{scene}/operations", timeout=10.0)
+    assert [op["shot_number"] for op in listing.json()] == [1, 2]
+    assert listing.json()[0]["notes_revision"] == 3

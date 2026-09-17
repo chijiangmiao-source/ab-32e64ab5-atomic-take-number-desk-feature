@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { createHttpApi } from './lib/api';
+import { mergeBoardSnapshot } from './lib/board';
 import { Issuer } from './lib/issuer';
 import type { IssuedOperation } from './lib/types';
+import { NotesCell } from './NotesCell';
 
 const api = createHttpApi();
 const SCENE_STORAGE_KEY = 'shot-number-issuer:scene';
@@ -26,19 +28,42 @@ export default function App() {
   const [sceneOps, setSceneOps] = useState<IssuedOperation[]>([]);
   const [boardError, setBoardError] = useState<string | null>(null);
 
-  const refreshBoard = useCallback(async (scene: string) => {
-    const trimmed = scene.trim();
-    if (!trimmed) {
-      setSceneOps([]);
-      return;
-    }
-    try {
-      setSceneOps(await api.listSceneOperations(trimmed));
-      setBoardError(null);
-    } catch {
-      setBoardError('场次看板刷新失败：镜号服务不可达');
-    }
+  // 轮询请求序号：较早发出的响应（网络抖动下可能晚到）绝不能覆盖更新的数据。
+  const pollSeq = useRef(0);
+
+  const applyBoardSnapshot = useCallback((fetched: IssuedOperation[]) => {
+    // 按操作标识合并，修订号只升不降：即便旧响应晚到，也不会用旧修订覆盖
+    // 新修订（包括本终端刚保存、或较新一次轮询已取回的内容）。
+    setSceneOps((previous) => mergeBoardSnapshot(previous, fetched));
   }, []);
+
+  const refreshBoard = useCallback(
+    async (scene: string) => {
+      const trimmed = scene.trim();
+      const seq = ++pollSeq.current;
+      if (!trimmed) {
+        setSceneOps([]);
+        return;
+      }
+      try {
+        const ops = await api.listSceneOperations(trimmed);
+        // 过期响应：期间又发起了更新的轮询（或场次已切换），直接丢弃。
+        if (seq !== pollSeq.current) return;
+        applyBoardSnapshot(ops);
+        setBoardError(null);
+      } catch {
+        if (seq !== pollSeq.current) return;
+        setBoardError('场次看板刷新失败：镜号服务不可达');
+      }
+    },
+    [applyBoardSnapshot],
+  );
+
+  const handleNotesSaved = useCallback((updated: IssuedOperation, merged: boolean) => {
+    // 行内保存成功：立即用服务端返回的最新行更新看板，不等下一次轮询。
+    applyBoardSnapshot([updated]);
+    if (merged) setBoardError(null);
+  }, [applyBoardSnapshot]);
 
   const issuedCount = snapshot.issued.length;
   useEffect(() => {
@@ -274,7 +299,7 @@ export default function App() {
               <thead>
                 <tr>
                   <th>镜号</th>
-                  <th>备注</th>
+                  <th>备注（行内可修订）</th>
                   <th>操作标识</th>
                   <th>发放时间 (UTC)</th>
                 </tr>
@@ -283,7 +308,9 @@ export default function App() {
                 {sceneOps.map((op) => (
                   <tr key={op.client_op_id} data-testid="scene-op-row">
                     <td className="num">#{op.shot_number}</td>
-                    <td>{op.notes || '—'}</td>
+                    <td className="notes-cell">
+                      <NotesCell op={op} api={api} onSaved={handleNotesSaved} />
+                    </td>
                     <td className="mono">{shortId(op.client_op_id)}</td>
                     <td className="mono">{op.created_at}</td>
                   </tr>

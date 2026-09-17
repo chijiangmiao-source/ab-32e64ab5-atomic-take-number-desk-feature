@@ -20,6 +20,7 @@ function issuedResponse(body: IssueRequestBody, shotNumber: number): IssueRespon
     notes: body.notes,
     shot_number: shotNumber,
     created_at: '2026-09-15T00:00:00.000Z',
+    notes_revision: 0,
     replayed: false,
   };
 }
@@ -31,6 +32,7 @@ function existingOperation(body: IssueRequestBody, shotNumber: number): IssuedOp
     notes: body.notes,
     shot_number: shotNumber,
     created_at: '2026-09-15T00:00:00.000Z',
+    notes_revision: 0,
   };
 }
 
@@ -44,6 +46,8 @@ describe('Issuer', () => {
     const api: ShotNumberApi = {
       issue: vi.fn(async (body) => issuedResponse(body, 7)),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
@@ -64,6 +68,8 @@ describe('Issuer', () => {
         throw new RetryableError('服务暂时不可用（HTTP 503）', 503);
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
@@ -96,6 +102,8 @@ describe('Issuer', () => {
         return { ...issuedResponse(body, 3), replayed: true };
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
@@ -131,6 +139,8 @@ describe('Issuer', () => {
         return issuedResponse(body, 1);
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
@@ -148,6 +158,8 @@ describe('Issuer', () => {
         throw new ConflictError('client_op_id 已被占用', existingOperation(body, 5));
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
@@ -177,6 +189,8 @@ describe('Issuer', () => {
         return issuedResponse(body, 2);
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
@@ -228,6 +242,8 @@ describe('Issuer', () => {
         return { ...issuedResponse(body, 4), replayed: true };
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 
@@ -256,6 +272,8 @@ describe('Issuer', () => {
         throw new RequestError('请求被拒绝：备注超过 4000 字上限', 422);
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
@@ -283,6 +301,8 @@ describe('Issuer', () => {
         throw new RetryableError('网络异常');
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const storage = memoryStorage();
     const issuer = new Issuer(api, storage, idSequence());
@@ -303,6 +323,8 @@ describe('Issuer', () => {
         return { ...issuedResponse(body, 9), replayed: calls.length > 1 };
       }),
       listSceneOperations: async () => [],
+      updateNotes: vi.fn(async () => { throw new Error("not used"); }),
+      listNoteRevisions: vi.fn(async () => []),
     };
     const issuer = new Issuer(api, memoryStorage(), idSequence());
 

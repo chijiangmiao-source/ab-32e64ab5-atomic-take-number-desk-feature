@@ -4,8 +4,9 @@
 
 - **严格连续**：每个场次的镜号从 1 开始逐个递增，无重复、无缺口；
 - **提交顺序**：号码分配顺序等于数据库事务提交顺序；
-- **幂等**：相同 `client_op_id` + 相同内容，无论并发、超时重试还是进程重启，永远返回最初发放的号码；
-- **冲突拒绝**：相同 `client_op_id` 携带不同内容，返回 `409`；
+- **幂等**：相同 `client_op_id` + 相同**发放内容**，无论并发、超时重试还是进程重启，永远返回最初发放的号码；
+- **冲突拒绝**：相同 `client_op_id` 携带不同发放内容，返回 `409`；
+- **备注可修订**：场记可在场次看板行内修改备注（递增修订号、保留历史），镜号、计数器与幂等指纹均不变；
 - **崩溃安全**：服务在“落库后、回包前”崩溃，重试仍能取回已提交的号码。
 
 ## 架构
@@ -50,8 +51,10 @@ docker compose --profile acceptance up --build --exit-code-from verify verify
 `verify` 服务依次执行（任一步失败即整体失败，退出码非 0）：
 
 1. 检查 `web → api` 反向代理链路与健康检查；
-2. **pytest**：20 并发无重号无缺号、重复提交幂等、409 冲突、**进程重启后映射与计数恢复**、故障注入后重试取回原号码（其中 `test_live_service.py` 直接打向 compose 中运行的 `api` 服务）；
-3. **Vitest**：前端待重试保留、本地持久化、重试幂等键不变、409 反馈等逻辑。
+2. **pytest**：20 并发无重号无缺号、重复提交幂等、409 冲突、**进程重启后映射与计数恢复**、故障注入后重试取回原号码、**旧库迁移与幂等重放、备注修订三方合并/冲突**（其中 `test_live_service.py` 直接打向 compose 中运行的 `api` 服务）；
+3. **Vitest**：前端待重试保留、本地持久化、重试幂等键不变、409 反馈，以及备注草稿状态机与看板修订号归并等逻辑。
+
+浏览器端到端（Playwright，本地 `cd web && npm run e2e`）额外覆盖：行内修订、两终端不相交自动合并、重叠冲突解决、断网重试。
 
 ## 幂等协议与事务边界
 
@@ -72,13 +75,16 @@ docker compose --profile acceptance up --build --exit-code-from verify verify
 ```
 BEGIN IMMEDIATE                        -- 立即取得写锁，串行化所有发放事务
   SELECT operations                    -- ① 按 client_op_id 查已提交映射
-    ├─ 命中且内容一致 → COMMIT，返回原号码（幂等重放，不动计数器）
+    ├─ 命中且 scene_id 与 notes_fingerprint 一致 → COMMIT，返回原号码（幂等重放，不动计数器）
     └─ 命中但内容不同 → ROLLBACK，返回 409（不动计数器）
   INSERT INTO scene_counters …         -- ② 场次计数器原子 +1（不存在则从 1 开始）
     ON CONFLICT DO UPDATE … RETURNING
-  INSERT INTO operations …             -- ③ 写入 client_op_id → 镜号 的持久映射
-COMMIT                                 -- ④ 提交后号码才对其他连接可见
+  INSERT INTO operations …             -- ③ 写 client_op_id → 镜号（notes_fingerprint 固定为发放备注）
+  INSERT INTO note_revisions … (r0)    -- ④ 发放备注作为修订历史的第 0 版
+COMMIT                                 -- ⑤ 提交后号码才对其他连接可见
 ```
+
+备注修订（`Storage.update_notes`）同样是单事务：读当前行 → 必要时做三方合并 → 更新 `operations.notes/notes_revision` 与追加 `note_revisions` 一并提交；409 冲突时整体 ROLLBACK，场次、镜号、计数器、`client_op_id` 全程不变。
 
 关键性质：
 
@@ -97,12 +103,40 @@ COMMIT                                 -- ④ 提交后号码才对其他连接�
 
 页面上“开发选项”中的复选框对应此参数；重试按钮永远不会再携带它。
 
+### 备注修订协议（镜号不变）
+
+场记常在镜号发放后补充/订正备注。为了让“改备注”不污染幂等判定：
+
+- **不可变请求指纹**：`operations.notes_fingerprint` 保存发放时的备注原文，幂等重放与 409 判定只比较指纹；`operations.notes` 是**当前可修订备注**，配 `notes_revision`（发放备注为 `0`，每次修订 +1）；
+- **修订历史**：每次修订在同一事务内向 `note_revisions` 追加一个不可变版本（修订号、文本、时间）；
+- **绝不触碰**：场次、镜号、场次计数器、`client_op_id`。
+
+修订接口：
+
+```
+PATCH /api/operations/{client_op_id}/notes
+{ "client_op_id": "…", "base_revision": 2, "notes": "新文本" }
+```
+
+- 基础修订号 == 服务端当前修订号：正常保存为下一个修订（`merge_status: "updated"`）；
+- 基础修订号落后（其他终端已保存）：服务端以基础版本为共同祖先，对本终端文本与服务端当前文本做**确定性的按行三方合并**——不相交改动自动合并，且只产生一个新修订（`merge_status: "merged"`）；改动重叠则返回 `409`，响应体含每个冲突区域的三方片段（`base` / `mine` / `theirs`）与服务端当前行，**数据库保持原样**；
+- 场记对照三方片段在本地整理文本后，以服务端当前修订号为新基础再次保存即可；
+- 保存响应丢失（网络失败/超时）后用**相同基础修订号与文本**重试是安全的：合并出的文本与当前一致时不会重复产生修订号。
+
+前端场次看板行内维护 `只读 / 编辑中 / 保存中 / 冲突` 一组草稿状态：网络失败或冲突都保留已输入文本；看板轮询按操作标识归并且修订号只升不降，较早的轮询响应即使晚到也不会覆盖新修订。
+
+### 旧数据库迁移
+
+服务启动时若发现旧版 `operations` 表（只有 `notes`、没有修订列），会在一个事务内自动完成：新增 `notes_fingerprint/notes_revision/notes_updated_at` 列，把原 `notes` 原样复制为指纹，并为每行播种修订号 `0` 的历史版本。旧库启动后无需人工处理；同一 `client_op_id` 携带发放时备注重试仍取回原号码。
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/shot-numbers` | 领取镜号。新操作返回 `201`，幂等重放返回 `200`（`replayed: true`），内容冲突返回 `409`，注入故障返回 `503` |
-| `GET` | `/api/scenes/{scene_id}/operations` | 场次已发放镜号列表（按号码升序） |
+| `PATCH` | `/api/operations/{client_op_id}/notes` | 行内修订备注。请求体 `{client_op_id, base_revision, notes}`；正常 `updated`、落后且不相交 `merged`（均 200），重叠冲突返回带三方片段的 `409` |
+| `GET` | `/api/operations/{client_op_id}/note-revisions` | 备注修订历史（修订号升序，`0` 为发放备注） |
+| `GET` | `/api/scenes/{scene_id}/operations` | 场次已发放镜号列表（按号码升序，含当前备注与修订号） |
 | `GET` | `/api/operations/{client_op_id}` | 按操作标识查询（不存在返回 `404`） |
 | `GET` | `/api/health` | 健康检查 |
 
@@ -148,14 +182,18 @@ cd web && npx playwright install chromium && npm run e2e
 ├── compose.yaml            # api / web / verify 三个服务，WEB_PORT、API_PORT 可覆盖
 ├── api/                    # FastAPI 应用与 Dockerfile
 │   └── app/
-│       ├── main.py         # 路由、409/503 语义、故障注入开关
-│       └── storage.py      # 事务边界：BEGIN IMMEDIATE … COMMIT（见文件头注释）
-├── tests/                  # pytest：并发、重启、故障注入、live 服务验收
+│       ├── main.py         # 路由、409/503 语义、备注修订接口、故障注入开关
+│       ├── storage.py      # 事务边界：BEGIN IMMEDIATE … COMMIT；旧库自动迁移（见文件头注释）
+│       └── merge.py        # 确定性按行三方合并（不相交自动合并，重叠产出三方片段）
+├── tests/                  # pytest：并发、重启、故障注入、迁移/重放、三方合并、live 服务验收
 ├── verify/                 # 一次性验收服务（Dockerfile + run.sh）
 └── web/                    # React + TypeScript 前端
+    ├── src/NotesCell.tsx   # 看板行内备注编辑器（编辑/保存中/冲突草稿状态、修订历史）
     ├── src/lib/issuer.ts   # 待重试操作的持久化与幂等重试
-    ├── src/lib/api.ts      # 409/5xx/网络异常分类
-    └── e2e/                # Playwright：故障后保留待重试、恢复后显示唯一镜号、409 反馈
+    ├── src/lib/noteDraft.ts# 备注草稿状态机（纯函数）
+    ├── src/lib/board.ts    # 看板轮询归并：修订号只升不降，旧响应不覆盖新修订
+    ├── src/lib/api.ts      # 409（发放冲突/备注冲突）/5xx/网络异常分类
+    └── e2e/                # Playwright：故障重试、409、行内修订、合并、冲突解决、断网重试
 ```
 
 ## 环境变量
